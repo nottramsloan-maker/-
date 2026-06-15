@@ -1022,34 +1022,217 @@
     let hoveredBubble = null;
     let activeBubble = null;
 
-    // 气泡内企业名称换行
-    function wrapTextLines(ctx, text, maxWidth) {
-      const chars = [...text];
-      const lines = [];
-      let line = '';
-      for (const ch of chars) {
-        const test = line + ch;
-        if (ctx.measureText(test).width > maxWidth && line) {
-          lines.push(line);
-          line = ch;
+    // 气泡内企业名称换行：最多两行（第一列/第二列），括号完整、禁止单字成行
+    function charCount(text) {
+      return [...text].length;
+    }
+
+    const LABEL_KEEP_PHRASES = [
+      '股份有限公司',
+      '有限责任公司',
+      '科技有限公司',
+      '科技股份有限公司',
+      '产业互联网有限公司',
+      '产业互联网',
+      '数字城市科技',
+      '数字科技',
+      '科技创新中心',
+      '科技创新',
+      '河北雄安',
+      '雄安新区',
+      '有限公司',
+      '研究院',
+      '研究所',
+      '区块链',
+      '分公司',
+      '雄安',
+      '创新',
+      '有限',
+      '公司',
+      '科技',
+      '数字',
+      '智能',
+      '产业',
+      '技术',
+      '数据',
+      '网络',
+      '信息',
+      '通信',
+      '电子',
+      '软件',
+      '系统',
+      '平台',
+      '服务',
+      '管理',
+      '集团',
+      '控股',
+      '互联',
+      '中心',
+      '国创',
+      '数智',
+      '能源',
+      '电力',
+      '铁塔',
+      '联通',
+      '电信',
+      '中车',
+      '昆仑',
+      '北京',
+      '河北',
+    ].sort((a, b) => b.length - a.length);
+
+    function matchKeepPhrase(text, start) {
+      for (const phrase of LABEL_KEEP_PHRASES) {
+        if (text.startsWith(phrase, start)) return phrase;
+      }
+      return null;
+    }
+
+    function tokenizePlainCjkRun(text) {
+      const tokens = [];
+      for (let i = 0; i < text.length; ) {
+        const phrase = matchKeepPhrase(text, i);
+        if (phrase) {
+          tokens.push(phrase);
+          i += phrase.length;
+          continue;
+        }
+        const remain = text.length - i;
+        if (remain >= 2) {
+          tokens.push(text.slice(i, i + 2));
+          i += 2;
         } else {
-          line = test;
+          tokens.push(text[i]);
+          i += 1;
         }
       }
-      if (line) lines.push(line);
+      return tokens;
+    }
+
+    function tokenizeLabelText(text) {
+      const tokens = [];
+      for (let i = 0; i < text.length; ) {
+        const ch = text[i];
+        if (ch === '（') {
+          const end = text.indexOf('）', i + 1);
+          if (end !== -1) {
+            tokens.push(text.slice(i, end + 1));
+            i = end + 1;
+            continue;
+          }
+        }
+        if (ch === '(') {
+          const end = text.indexOf(')', i + 1);
+          if (end !== -1) {
+            tokens.push(text.slice(i, end + 1));
+            i = end + 1;
+            continue;
+          }
+        }
+        if (ch === '“') {
+          const end = text.indexOf('”', i + 1);
+          if (end !== -1) {
+            tokens.push(text.slice(i, end + 1));
+            i = end + 1;
+            continue;
+          }
+        }
+        if (/[\u4e00-\u9fff]/.test(ch)) {
+          let j = i;
+          while (j < text.length && /[\u4e00-\u9fff]/.test(text[j])) j += 1;
+          tokens.push(...tokenizePlainCjkRun(text.slice(i, j)));
+          i = j;
+          continue;
+        }
+        tokens.push(ch);
+        i += 1;
+      }
+      return tokens;
+    }
+
+    function measureLine(ctx, text) {
+      return ctx.measureText(text).width;
+    }
+
+    function wrapTokensToLines(ctx, tokens, maxWidth) {
+      const lines = [];
+      let current = [];
+      let width = 0;
+      for (const token of tokens) {
+        const tokenWidth = measureLine(ctx, token);
+        if (current.length && width + tokenWidth > maxWidth) {
+          lines.push(current.join(''));
+          current = [token];
+          width = tokenWidth;
+        } else {
+          current.push(token);
+          width += tokenWidth;
+        }
+      }
+      if (current.length) lines.push(current.join(''));
       return lines;
+    }
+
+    function fixOrphanLines(lines) {
+      const result = [...lines];
+      while (result.length > 1 && charCount(result[result.length - 1]) === 1) {
+        result[result.length - 2] += result.pop();
+      }
+      while (result.length > 1 && charCount(result[0]) === 1) {
+        result[1] = result[0] + result[1];
+        result.shift();
+      }
+      return result;
+    }
+
+    function splitTokensIntoTwoLines(ctx, tokens, maxWidth) {
+      let best = null;
+      for (let i = 1; i < tokens.length; i++) {
+        const line1 = tokens.slice(0, i).join('');
+        const line2 = tokens.slice(i).join('');
+        if (charCount(line1) === 1 || charCount(line2) === 1) continue;
+        const w1 = measureLine(ctx, line1);
+        const w2 = measureLine(ctx, line2);
+        if (w1 > maxWidth || w2 > maxWidth) continue;
+        const score = Math.max(w1, w2);
+        if (!best || score < best.score) {
+          best = { lines: [line1, line2], score };
+        }
+      }
+      return best ? best.lines : null;
+    }
+
+    function layoutBubbleLabelLines(ctx, text, maxWidth) {
+      const tokens = tokenizeLabelText(text);
+      let lines = fixOrphanLines(wrapTokensToLines(ctx, tokens, maxWidth));
+      if (lines.length <= 2) return lines;
+
+      const forced = splitTokensIntoTwoLines(ctx, tokens, maxWidth);
+      if (forced) return fixOrphanLines(forced);
+
+      for (let i = tokens.length - 1; i >= 1; i--) {
+        const line1 = tokens.slice(0, i).join('');
+        const line2 = tokens.slice(i).join('');
+        if (charCount(line1) === 1 || charCount(line2) === 1) continue;
+        return fixOrphanLines([line1, line2]);
+      }
+      return lines.slice(0, 2);
+    }
+
+    function linesFit(ctx, lines, maxWidth) {
+      return lines.length <= 2 && lines.every((line) => measureLine(ctx, line) <= maxWidth);
     }
 
     function computeLabelLayout(bubble) {
       const r = bubble.baseR;
       const maxWidth = r * 1.45;
       let fontSize = Math.min(r * 0.19, 17);
+      const minFontSize = 9;
       let lines = [];
-      for (let i = 0; i < 8; i++) {
+      for (; fontSize >= minFontSize; fontSize -= 1) {
         ctx.font = `520 ${fontSize}px ${FONT_FAMILY}`;
-        lines = wrapTextLines(ctx, bubble.title, maxWidth);
-        if (lines.length <= 4) break;
-        fontSize -= 1;
+        lines = layoutBubbleLabelLines(ctx, bubble.title, maxWidth);
+        if (linesFit(ctx, lines, maxWidth)) break;
       }
       bubble.labelLayout = {
         lines,
